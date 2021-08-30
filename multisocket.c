@@ -8,12 +8,12 @@
 #include <assert.h>
 #include <netinet/in.h>
 #include <netdb.h>
-#include <vector>
-extern "C" {
+#include <fcntl.h>
+
 #include <linux/bpf.h>
-    #include <linux/filter.h>
+#include <linux/filter.h>
+#include "../bpf_load.h"
 //#include <bpf/libbpf.h>
-}
 #ifndef __NR_bpf
 # if defined(__i386__)
 #  define __NR_bpf 357
@@ -37,11 +37,13 @@ static inline int sys_bpf(enum bpf_cmd cmd, union bpf_attr *attr,
 {
     return syscall(__NR_bpf, cmd, attr, size);
 }
+
+#define LOG_BUF_SIZE 16384
+
 int
 bpf_prog_load(enum bpf_prog_type type,
               const struct bpf_insn *insns, int insn_cnt,
               const char *license) {
-    const size_t LOG_BUF_SIZE = 16384;
     char bpf_log_buf[LOG_BUF_SIZE] = {0};
 
     union bpf_attr attr;
@@ -57,25 +59,74 @@ bpf_prog_load(enum bpf_prog_type type,
     if (ret < 0) {
         fprintf(stderr, "%s\n", bpf_log_buf);
     }
+    union bpf_attr map_attr;
+    map_attr.map_type = BPF_MAP_TYPE_HASH;
+    map_attr.key_size = sizeof(uint64_t);
+    map_attr.value_size = sizeof(uint64_t);
+    map_attr.max_entries = 8;
+    map_attr.map_flags = 0;
+    int map = sys_bpf(BPF_MAP_CREATE, &map_attr, sizeof(map_attr));
+    if (map < 0) {
+        perror("MAP CREATION");
+        return map;
+    }
     return ret;
 }
 
+int xbpf_map_update_elem(int fd, const void *key, const void *value,	__u64 flags) {
+    union bpf_attr attr;
+    attr.map_fd = fd;
+    attr.flags = flags;
+    attr.map_fd = fd;
+    attr.key = key;
+    attr.value = value;
+    return sys_bpf(BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr));
+}
+    
+int load_elf_bpf(int sockfd, const char*filename) {
+    int i;
+    /*
+    static int local_fixup_map_fd = 0;
+    void local_fixup_map_cb(struct bpf_map_data *map, int idx) {
+        printf("CALLBACK FROM KERNEL WITH %d %d\n", idx, map->fd);
+        local_fixup_map_fd = map->fd;
+        }*/
+    int ret = load_bpf_file(filename);
+    if (ret != 0) {
+        perror("ERror loading ELF");
+        return ret;
+    }
+    fprintf(stderr, "LOADING FROM %d fd's\n", prog_cnt);
+    for (i=0;i<prog_cnt;++i) {
+        fprintf(stderr, "LOADING FROM %d fd: %d\n", i, prog_fd[i]);
+        if (setsockopt(sockfd, SOL_SOCKET, SO_ATTACH_BPF, &prog_fd[i], sizeof(prog_fd[i]))) {
+            perror("setsockopt ATTACH_FILTER");
+            return -1;
+        }
+    }
+    return map_data_count?map_fd[0]:-1;
+}
+
 int load_bpf_by_file(int sockfd, const char*filename) {
+    
     FILE * fp = fopen(filename, "rb");
     if (!fp) {
         return -1;
     }
-    std::vector<uint8_t> bpf_program;
-    unsigned char tmp[1024];
-    while(true) {
+    uint8_t * bpf_program = NULL;
+    uint8_t tmp[1024];
+    size_t bpf_program_len = 0;
+    while(1) {
         size_t count = fread(tmp, 1, sizeof(tmp), fp);
         if (count ==0) {
             break;
         }
-        bpf_program.insert(bpf_program.end(), (uint8_t*)tmp, (uint8_t*)tmp + count);
+        bpf_program_len += count;
+        bpf_program = realloc(bpf_program, bpf_program_len);
+        memcpy(bpf_program + bpf_program_len - count, tmp, count);
     }
     fclose(fp);
-    int bpf_fd = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, (const struct bpf_insn *)bpf_program.data(), bpf_program.size()/ sizeof(struct bpf_insn), "BSD");
+    int bpf_fd = bpf_prog_load(BPF_PROG_TYPE_SOCKET_FILTER, (const struct bpf_insn *)bpf_program, bpf_program_len/ sizeof(struct bpf_insn), "BSD");
     if (bpf_fd < 0) {
         return bpf_fd;
     }
@@ -93,6 +144,7 @@ int load_bpf_by_file(int sockfd, const char*filename) {
 
 int send_packets(int src_port, int dst_port, int count) {
     int sockfd;
+    int i;
     struct sockaddr_in srvaddr, cliaddr;
     uint8_t data[8] = {'0','b','a','d', 'f','0', '0','0'};
     memset(&cliaddr, 0, sizeof(cliaddr));
@@ -115,7 +167,7 @@ int send_packets(int src_port, int dst_port, int count) {
         perror("bind failed");
         exit(EXIT_FAILURE);
     }
-    for (int i = 0;i <count ; ++i) {
+    for (i = 0;i <count ; ++i) {
         data[7] = 'a' + i% 10;
         data[6] = '0' + (i/ 10)% 10;
         data[5] = '0' + (i/ 100)% 10;
@@ -127,10 +179,10 @@ int send_packets(int src_port, int dst_port, int count) {
     }
     close(sockfd);
 }
-
-int main() {
+#define MAXLINE 65537
+int main(int argc, char**argv) {
+    int i;
     int sockfd;
-    const size_t MAXLINE = 65537;
     char buffer[MAXLINE] = {0};
     struct sockaddr_in srvaddr, cliaddr;
       
@@ -139,11 +191,24 @@ int main() {
         perror("socket creation failed");
         exit(EXIT_FAILURE);
     }
-
+    
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags == -1) return false;
+    if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("NONBLOCK");
+    }
+/*
     if (load_bpf_by_file(sockfd, "all_allow.bpf") < 0) {
         perror("BPF FAILED");
     }
-
+*/
+    int buffer_reset_fd = load_elf_bpf(sockfd, "all_allow.o");
+    if (buffer_reset_fd < 0) {
+        perror("BPF FAILED");
+    }
+    long zero = 0;
+    long framecycles = 0;
+    bpf_map_update_elem(buffer_reset_fd, &zero, &framecycles, 0);
     memset(&srvaddr, 0, sizeof(srvaddr));
     memset(&cliaddr, 0, sizeof(cliaddr));
       
@@ -160,25 +225,39 @@ int main() {
         exit(EXIT_FAILURE);
     }
     socklen_t srvlen = sizeof(srvaddr);
-    getsockname(sockfd, (sockaddr*)&srvaddr, &srvlen);
+    getsockname(sockfd, (struct sockaddr*)&srvaddr, &srvlen);
     uint16_t port = ntohs(srvaddr.sin_port);
-    send_packets(9999, port, 16);
-    send_packets(9998, port, 16);
-    socklen_t len, n;
-
-    for (int i = 0; i <  32; ++ i) {
-        len = sizeof(cliaddr);  //len is value/resuslt
-        n = recvfrom(sockfd, (char *)buffer, MAXLINE - 1, 
-                     MSG_WAITALL, ( struct sockaddr *) &cliaddr,
-                     &len);
-        buffer[n] = '\0';
-        char addr_buffer[INET6_ADDRSTRLEN];
-        if (getnameinfo((struct sockaddr*)&cliaddr,len,addr_buffer,sizeof(addr_buffer),
-                        0,0,0) < 0) {
-            perror("getname info error");
+    for (framecycles= 0;framecycles<8;++framecycles) {
+        bpf_map_update_elem(buffer_reset_fd, &zero, &framecycles, 0);        
+        send_packets(9999, port, 16);
+        send_packets(9998, port, 16);
+        socklen_t len, n;
+        
+        for (i = 0; i <  32; ++ i) {
+            len = sizeof(cliaddr);  //len is value/resuslt
+            n = recvfrom(sockfd, (char *)buffer, MAXLINE - 1, 
+                         MSG_WAITALL, ( struct sockaddr *) &cliaddr,
+                         &len);
+            if (n == -1) {
+                printf("NO MORE DATA\n");
+                break;
+            }
+            buffer[n] = '\0';
+            char addr_buffer[INET6_ADDRSTRLEN];
+            if (getnameinfo((struct sockaddr*)&cliaddr,len,addr_buffer,sizeof(addr_buffer),
+                            0,0,0) < 0) {
+                perror("getname info error");
+            }
+            printf("[%s:%d]: %s\n",addr_buffer, ntohs(cliaddr.sin_port), buffer);
+            fflush(stdout);
+        }/*
+        long xdata = -1;
+        int ret = bpf_map_lookup_elem(buffer_reset_fd, &zero, &xdata);
+        if (ret < 0) {
+            perror("LOOKUP OF SET ELEMENT");
         }
-        printf("[%s:%d]: %s\n",addr_buffer, ntohs(cliaddr.sin_port), buffer);
-        fflush(stdout);
+        fprintf(stderr, "WHAT IS THIS %ld\n",xdata);
+         */
     }
     return 0;
 }

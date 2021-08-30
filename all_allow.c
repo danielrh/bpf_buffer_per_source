@@ -7,8 +7,8 @@
 #include <linux/udp.h>
 #include <stddef.h>
 #include <linux/byteorder/little_endian.h>
-//#include "prototype-kernel/kernel/samples/bpf/tools/include/linux/types.h"
-//#include "prototype-kernel/kernel/samples/bpf/bpf_helpers.h"
+#include "prototype-kernel/kernel/samples/bpf/tools/include/linux/types.h"
+#include "prototype-kernel/kernel/samples/bpf/bpf_helpers.h"
 #define DO_DROP 0
 #define DO_PASS 0xffffffff
 
@@ -29,12 +29,49 @@ unsigned long long load_word(void *skb,
 			     unsigned long long off) asm("llvm.bpf.load.word");
 
 
+char _license[] SEC("license") = "GPL";
+//u32 _version SEC("version") = LINUX_VERSION_CODE;
+
+struct bpf_map_def SEC("maps") counter_map = {
+    .type = BPF_MAP_TYPE_HASH,//BPF_MAP_TYPE_PERCPU_HASH,
+    .key_size = sizeof(long),
+    .value_size = sizeof(long),
+    .max_entries = 8,
+};
+
+SEC("socket_filter")
 int udpfilter(struct __sk_buff *skb)
 {
     unsigned short src_port = load_half(skb, offsetof(struct udphdr, source));
-    if (src_port == 9999) {
-        
-     return DO_DROP;
+    long key = src_port; // FIXME: add ip in there
+    long zero = 0;
+    long *cycle = bpf_map_lookup_elem(&counter_map, &zero);
+    if (!cycle) {
+        return DO_PASS;
+    }
+    long cycle_mask = 1;
+    cycle_mask <<= (sizeof(cycle)*8 - 16);
+    cycle_mask -= 1;
+    long masked_cycle = (*cycle) & cycle_mask;
+    long *counter = bpf_map_lookup_elem(&counter_map, &key);
+    /*
+    char fmta[] = "Cycle mask %lx\n";
+    bpf_trace_printk(fmta, sizeof(fmta), masked_cycle);
+    char fmtb[] = "Counter cycle %lx\n";
+    bpf_trace_printk(fmtb, sizeof(fmtb), counter ?((*counter >> 16) & cycle_mask): 0xdeadbeef);
+    char fmtc[] = "Counter counter %lx\n";
+    bpf_trace_printk(fmtc, sizeof(fmtc), counter? (0xffff&*counter):0xdeadbeef);
+    char fmtd[] = "Counter port %ld\n";
+    bpf_trace_printk(fmtd, sizeof(fmtd), src_port);
+    */
+    if (!counter || ((*counter >> 16) & cycle_mask) != masked_cycle) {
+        long one = 1 | (masked_cycle << 16);
+        bpf_map_update_elem(&counter_map, &key, &one, 0);
+    } else {
+        if ((0xffff&*counter) > 2) {
+            return DO_DROP;
+        }
+        *counter = (*counter + 1);
     }
     return DO_PASS;
   /*
