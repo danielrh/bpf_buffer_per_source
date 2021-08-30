@@ -1,8 +1,8 @@
-clang -O2 -emit-llvm -c all_allow.c -o - | llc -march=bpf -mcpu=probe -filetype=obj -o all_allow.o
-objdump -h all_allow.o|grep .text | awk '{printf "if=all_allow.o of=/dev/stdout bs=1 count=%d skip=%d",strtonum("0x"$3), strtonum("0x"$6)}' |xargs dd > all_allow.bpf
+clang -O2 -I../../../tools/testing/selftests -emit-llvm -c limited_per_source.c -o - | llc -march=bpf -mcpu=probe -filetype=obj -o limited_per_source.o
+objdump -h limited_per_source.o|grep .socket_filter | awk '{printf "if=limited_per_source.o of=/dev/stdout bs=1 count=%d skip=%d",strtonum("0x"$3), strtonum("0x"$6)}' |xargs dd > limited_per_source.bpf
 export KERNEL_SOURCE=/usr/src/linux-source-4.15.0/linux-source-4.15.0
 export KERNEL_ARCH_SOURCE=/usr/src/linux-source-4.15.0/linux-source-4.15.0/arch/x86/include/
-gcc -std=gnu99 multisocket.c -g #-I$KERNEL_SOURCE/samples/bpf/ $KERNEL_SOURCE/samples/bpf/bpf_load.c -I./prototype-kernel/kernel/samples/bpf/tools/lib/  -I$KERNEL_SOURCE/tools/perf -I$KERNEL_SOURCE/include -I$KERNEL_ARCH_SOURCE
+#gcc -std=gnu99 multisocket.c -g #-I$KERNEL_SOURCE/samples/bpf/ $KERNEL_SOURCE/samples/bpf/bpf_load.c -I./prototype-kernel/kernel/samples/bpf/tools/lib/  -I$KERNEL_SOURCE/tools/perf -I$KERNEL_SOURCE/include -I$KERNEL_ARCH_SOURCE
 #gcc -Wp,-MD,/home/danielrh/Downloads/linux-4.15.0/samples/bpf/multisocket/.multisocket.d -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -std=gnu89  -I../../../include -I../../../tools/lib/ -I../../../tools/testing/selftests/bpf/ -I../../../tools/lib/ -I../../../tools/include -I../../../tools/perf -DHAVE_ATTR_TEST=0     -o multisocket multisocket.c  ../bpf_load.c ../../../tools/lib/bpf/bpf.c -Wall -Wmissing-prototypes -Wstrict-prototypes -O2 -fomit-frame-pointer -std=gnu89  -I../../../usr/include -I../../../tools/lib/ -I../../../tools/testing/selftests/bpf/ -I../../../tools/lib/ -I../../../tools/include -I../../../tools/perf -DHAVE_ATTR_TEST=0 -lelf -I../../../arch/x86/include/
 
 #make KBUILD_MODULES=1 \

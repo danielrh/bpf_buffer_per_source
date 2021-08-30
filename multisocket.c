@@ -198,11 +198,11 @@ int main(int argc, char**argv) {
         perror("NONBLOCK");
     }
 /*
-    if (load_bpf_by_file(sockfd, "all_allow.bpf") < 0) {
+    if (load_bpf_by_file(sockfd, "limited_per_source.bpf") < 0) {
         perror("BPF FAILED");
     }
 */
-    int buffer_reset_fd = load_elf_bpf(sockfd, "all_allow.o");
+    int buffer_reset_fd = load_elf_bpf(sockfd, "limited_per_source.o");
     if (buffer_reset_fd < 0) {
         perror("BPF FAILED");
     }
